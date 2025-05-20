@@ -22,12 +22,15 @@
 #define LED_GREEN  11
 #define tam_quad 10
 
+// Struct para armazenar os dados do joystick
 typedef struct {
     uint16_t x_pos;
     uint16_t y_pos;
 } joystick_data_t;
 
+// Criação da fila para o joystick
 QueueHandle_t xQueueJoystickData;
+// Variáveis de estado crítico que controlam o fluxo do programa
 bool estadoCriticoVolumeAgua = false, estadoCriticoChuva = false;
 
 //------------- Inicio das estruturas e funções usadas pra matriz de leds -------------//
@@ -37,6 +40,7 @@ typedef struct {
   double b;
 } Pixel;
 
+// Padrão a ser exibido na matriz de leds
 Pixel desenho[25] = { 
     {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0},
     {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.01, 0.0, 0.0},
@@ -64,10 +68,13 @@ void desenho_pio(PIO pio, uint sm) {
         desenho[24-i].r,  // vermelho
         desenho[24-i].g   // verde
         );
+
+        // Acende os leds somente se o estado crítico de volume de água ou chuva estiver ativo
+        // Caso contrário, apaga os leds
         pio_sm_put_blocking(pio, sm, estadoCriticoChuva||estadoCriticoVolumeAgua?valor_led:0);
     }
 }
-//------------- Fim das estruturas e funções usadas usadas pra matriz de leds -------------//
+//------------- Fim das estruturas e funções usadas pra matriz de leds -------------//
 
 // Tarefa de controle da matriz de LEDs
 void vLedMatrixTask() {
@@ -85,10 +92,12 @@ void vLedMatrixTask() {
 }
 
 void vJoystickTask(void *params) {
+    // Inicializa o ADC
     adc_gpio_init(ADC_JOYSTICK_Y);
     adc_gpio_init(ADC_JOYSTICK_X);
     adc_init();
 
+    // Estrutura que guarda as leituras do joystick
     joystick_data_t joydata;
 
     while (true) {
@@ -104,35 +113,42 @@ void vJoystickTask(void *params) {
 }
 
 void vDisplayTask(void *params) {
+    joystick_data_t joydata; // Guarda os valores lidos do joystick e recuperados da fila
+    bool cor = true; // Usado para controle do display
+    char str[40]; // Buffer para guardar as strings que serão exibidas no display
+
+    // Inicializa o display OLED
     i2c_init(I2C_PORT, 400 * 1000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA);
     gpio_pull_up(I2C_SCL);
-
     ssd1306_t ssd;
     ssd1306_init(&ssd, WIDTH, HEIGHT, false, endereco, I2C_PORT);
     ssd1306_config(&ssd);
     ssd1306_send_data(&ssd);
-    char str[40];
 
-    joystick_data_t joydata;
-    bool cor = true;
+    // Esse while controla o display e atualiza as flags de controle que são "ouvidas" no resto do código
     while (true) {
         if (xQueueReceive(xQueueJoystickData, &joydata, portMAX_DELAY) == pdTRUE) {
+            // O joystick tem uma faixa de 0 a 4095, então convertemos para porcentagem
             float x = joydata.x_pos*100/4095.0;
             float y = joydata.y_pos*100/4095.0;
 
             ssd1306_fill(&ssd, !cor); // Limpa a tela
             sprintf(str, "Agua: %.0f", x);
-            ssd1306_draw_string(&ssd, str, 0, 0);
+            ssd1306_draw_string(&ssd, str, 0, 0); // Escreve o conteúdo do eixo x na tela
             sprintf(str, "Chuvas: %.0f", y);
-            ssd1306_draw_string(&ssd, str, 0, 12);
+            ssd1306_draw_string(&ssd, str, 0, 12); // Escreve o conteúdo do eixo y na tela
 
-            if(x>70) estadoCriticoVolumeAgua = true; else estadoCriticoVolumeAgua = false;
+            // Verifica se os valores dos sensores estão acima do limite e modifica as flags de controle
+            if(x>70) estadoCriticoVolumeAgua = true; else estadoCriticoVolumeAgua = false; 
             if(y>80) estadoCriticoChuva = true; else estadoCriticoChuva = false;
+
+            // Caso as flags indiquem perigo, mostra alerta no display
             if(estadoCriticoVolumeAgua || estadoCriticoChuva) ssd1306_draw_string(&ssd, "ALERTA!", 40, 40);
-                    
+
+            // Envia os dados para serem exibidos no display
             ssd1306_send_data(&ssd);
         }
     }
@@ -148,11 +164,12 @@ void vLedTask(void *params) {
             // Desliga ou liga o LED vermelho com base nos estados críticos
             if (estadoCriticoVolumeAgua || estadoCriticoChuva) gpio_put(13, 1); else gpio_put(13, 0);
         }
-        vTaskDelay(pdMS_TO_TICKS(50)); // Atualiza a cada 50ms
+        vTaskDelay(1); // Atualiza a cada 50ms
     }
 }
 
 void vBuzzerTask(void *params) {
+    // Variáveis de controle do buzzer
     static int freq = 0;
     bool subindo = true;
 
@@ -171,6 +188,7 @@ void vBuzzerTask(void *params) {
     pwm_set_gpio_level(21, 0);
 
     while(true) {
+        // Entramos nesse if caso o volume de água ou a chuva estejam acima do limite
         if(estadoCriticoVolumeAgua || estadoCriticoChuva) {
             // Atualiza direção da variação de frequência
             if (subindo) {
@@ -190,8 +208,9 @@ void vBuzzerTask(void *params) {
             pwm_set_wrap(slice_num, wrap);
             pwm_set_chan_level(slice_num, pwm_gpio_to_channel(21), wrap / 8); // 12,5% duty cycle
             pwm_set_enabled(slice_num, true);
-            vTaskDelay(estadoCriticoChuva?pdMS_TO_TICKS(35):pdMS_TO_TICKS(10)); // Aguarda 50ms para cada tom
+            vTaskDelay(estadoCriticoChuva?pdMS_TO_TICKS(35):pdMS_TO_TICKS(10)); // Aguarda 50ms ou 100ms dependendo da flag ativa
         } else {
+            // Se não houver estado crítico, desliga o buzzer
             pwm_set_gpio_level(21, 0);
             pwm_set_enabled(pwm_gpio_to_slice_num(21), false);
             gpio_set_function(21, GPIO_FUNC_SIO);
@@ -226,6 +245,7 @@ int main() {
     xTaskCreate(vLedTask, "LED red Task", 256, NULL, 1, NULL);
     xTaskCreate(vLedMatrixTask, "Matriz de leds Task", 256, NULL, 1, NULL);
     xTaskCreate(vBuzzerTask, "Buzzer Task", 256, NULL, 1, NULL);
+
     // Inicia o agendador
     vTaskStartScheduler();
     panic_unsupported();
